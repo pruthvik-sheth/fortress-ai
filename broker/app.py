@@ -12,6 +12,7 @@ from typing import Any, Optional
 import uuid
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 import httpx
@@ -104,6 +105,15 @@ LOG_FILE = "data/broker_log.jsonl"
 # ============================================
 
 app = FastAPI(title="ShieldForce Ingress Broker", version="0.1.0")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],  # React dev servers
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 firewall = PromptFirewall()
 token_manager = CapabilityTokenManager(CAPABILITY_SECRET)
