@@ -80,7 +80,6 @@ function App() {
         {currentView === 'home' && (
           <HomeView 
             systemHealth={systemHealth}
-            connectionStatus={connectionStatus}
             setCurrentView={setCurrentView}
           />
         )}
@@ -106,7 +105,7 @@ function App() {
 }
 
 // Home View Component
-const HomeView = ({ systemHealth, connectionStatus, setCurrentView }) => {
+const HomeView = ({ systemHealth, setCurrentView }) => {
   return (
     <div className="grid lg:grid-cols-2 gap-16 items-center min-h-[70vh]">
       {/* Left Column */}
