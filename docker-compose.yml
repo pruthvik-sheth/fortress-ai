@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  agent:
+    build: ./agent
+    container_name: agent
+    expose:
+      - "7000"
+    networks:
+      - mesh
+    environment:
+      - GATEWAY_URL=http://gateway:9000
+      - CAPABILITY_SECRET=${CAPABILITY_SECRET:-dev-secret}
+      - CAP_ISS=broker
+      - CAP_AUD=agent
+    user: "1000:1000"
+    restart: unless-stopped
+
+  broker:
+    build: ./broker
+    container_name: broker
+    ports:
+      - "8001:8001"
+    networks:
+      - mesh
+    environment:
+      - PORT=8001
+      - BROKER_API_KEY=${BROKER_API_KEY:-DEMO-KEY}
+      - CAPABILITY_SECRET=${CAPABILITY_SECRET:-dev-secret}
+    volumes:
+      - ./broker/data:/app/data
+    restart: unless-stopped
+
+  gateway:
+    build: ./gateway
+    container_name: gateway
+    ports:
+      - "9000:9000"
+    networks:
+      - mesh
+      - public
+    environment:
+      - PORT=9000
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-claude-3-5-sonnet-latest}
+    volumes:
+      - ./gateway/data:/app/data
+    restart: unless-stopped
+
+networks:
+  mesh:
+    internal: true
+  public:
+    driver: bridge
