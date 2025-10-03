@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  agent:
+    build: .
+    container_name: agent-standalone
+    ports:
+      - "7000:7000"
+    environment:
+      - GATEWAY_URL=http://mock-gateway:9001
+      - CAPABILITY_SECRET=dev-secret
+      - CAP_ISS=broker
+      - CAP_AUD=agent
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    restart: unless-stopped
+    depends_on:
+      - mock-gateway
+
+  # Mock gateway for testing
+  mock-gateway:
+    build: ./mock-gateway
+    container_name: mock-gateway
+    ports:
+      - "9001:9001"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    restart: unless-stopped
