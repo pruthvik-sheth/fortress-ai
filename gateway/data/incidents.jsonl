@@ -2,3 +2,4 @@
 {"ts": 1759523734.3634307, "agent_id": "test-agent", "score": 100, "action": "QUARANTINE", "reasons": ["secrets_detected: api_key"], "url": "https://example.org/upload"}
 {"ts": 1759527401.3000927, "agent_id": "test-agent", "score": 100, "action": "QUARANTINE", "reasons": ["secrets_detected: api_key"], "url": "https://example.org/upload"}
 {"ts": 1759528811.1068215, "agent_id": "test-agent", "score": 100, "action": "QUARANTINE", "reasons": ["secrets_detected: api_key"], "url": "https://example.org/upload"}
+{"ts": 1759531339.2117715, "agent_id": "test-agent", "score": 100, "action": "QUARANTINE", "reasons": ["secrets_detected: api_key"], "url": "https://example.org/upload"}

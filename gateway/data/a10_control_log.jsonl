@@ -1,3 +1,4 @@
 {"ts": 1759523734.3578212, "event": "apply_waf_quarantine", "agent_id": "test-agent", "url": "https://example.org/upload", "score": 100, "reasons": ["secrets_detected: api_key"]}
 {"ts": 1759527401.2889044, "event": "apply_waf_quarantine", "agent_id": "test-agent", "url": "https://example.org/upload", "score": 100, "reasons": ["secrets_detected: api_key"]}
 {"ts": 1759528811.0999944, "event": "apply_waf_quarantine", "agent_id": "test-agent", "url": "https://example.org/upload", "score": 100, "reasons": ["secrets_detected: api_key"]}
+{"ts": 1759531339.2011986, "event": "apply_waf_quarantine", "agent_id": "test-agent", "url": "https://example.org/upload", "score": 100, "reasons": ["secrets_detected: api_key"]}
