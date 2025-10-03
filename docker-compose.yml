@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   agent:
     build: ./agent
@@ -17,7 +15,10 @@ services:
     restart: unless-stopped
 
   broker:
-    build: ./broker
+    build: 
+      context: ./broker
+      args:
+        ENABLE_LLM_BUILD: ${ENABLE_LLM_BUILD:-false}
     container_name: broker
     ports:
       - "8001:8001"
@@ -28,6 +29,7 @@ services:
       - PORT=8001
       - BROKER_API_KEY=${BROKER_API_KEY:-DEMO-KEY}
       - CAPABILITY_SECRET=${CAPABILITY_SECRET:-dev-secret}
+      - ENABLE_LLM_FIREWALL=${ENABLE_LLM_FIREWALL:-true}
     volumes:
       - ./broker/data:/app/data
     restart: unless-stopped

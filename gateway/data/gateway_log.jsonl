@@ -1,0 +1,1 @@
+{"ts": 1759525501.7803626, "agent_id": "test-agent", "url": "https://suspicious-domain.com", "method": "POST", "body_size": 23, "purpose": "test", "score": 0, "reasons": [], "action": "ALLOW", "processing_time_ms": 1.06}

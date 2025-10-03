@@ -4,3 +4,6 @@ httpx>=0.25.1
 pyjwt>=2.8.0
 python-dotenv>=1.0.0
 pydantic>=2.5.0
+
+# LLM Firewall (optional - install manually for enhanced detection)
+# pip install transformers torch --index-url https://download.pytorch.org/whl/cpu

@@ -96,6 +96,7 @@ BROKER_API_KEY = os.getenv("BROKER_API_KEY", "DEMO-KEY")
 CAPABILITY_SECRET = os.getenv("CAPABILITY_SECRET", "dev-secret")
 AGENT_URL = os.getenv("AGENT_URL", "http://agent:7000")
 INGRESS_AUDITOR = os.getenv("INGRESS_AUDITOR", "off") == "on"
+ENABLE_LLM_FIREWALL = os.getenv("ENABLE_LLM_FIREWALL", "true").lower() == "true"
 
 LOG_FILE = "data/broker_log.jsonl"
 
@@ -105,7 +106,7 @@ LOG_FILE = "data/broker_log.jsonl"
 
 app = FastAPI(title="ShieldForce Ingress Broker", version="0.1.0")
 
-firewall = PromptFirewall()
+firewall = PromptFirewall(enable_llm=ENABLE_LLM_FIREWALL)
 token_manager = CapabilityTokenManager(CAPABILITY_SECRET)
 
 # Simple RBAC: API key -> allowed agent IDs
@@ -219,22 +220,31 @@ async def invoke(
         raise HTTPException(status_code=400, detail="user_text cannot be empty")
     
     # ============================================
-    # 4. PROMPT FIREWALL
+    # 4. PROMPT FIREWALL (Multi-Layer)
     # ============================================
     
-    is_safe, block_reason, redactions = firewall.check(request.user_text)
+    is_safe, block_reason, redactions, llm_result = firewall.check(request.user_text)
     
     if not is_safe:
+        # Enhanced logging with LLM results
+        log_data = {
+            "reason": block_reason,
+            "agent_id": request.agent_id,
+            "api_key_hash": hash_api_key(x_api_key),
+            "user_text_preview": request.user_text[:100],
+            "request_id": request_id
+        }
+        
+        # Add LLM analysis results if available
+        if llm_result:
+            log_data["llm_confidence"] = llm_result.get("confidence", 0.0)
+            log_data["llm_inference_time_ms"] = llm_result.get("inference_time_ms", 0.0)
+            log_data["llm_timeout"] = llm_result.get("timeout", False)
+        
         log_event(
             LOG_FILE,
             "firewall_blocked",
-            {
-                "reason": block_reason,
-                "agent_id": request.agent_id,
-                "api_key_hash": hash_api_key(x_api_key),
-                "user_text_preview": request.user_text[:100],
-                "request_id": request_id
-            }
+            log_data
         )
         
         return InvokeResponse(
@@ -396,6 +406,11 @@ async def startup():
     print("🛡️  ShieldForce Ingress Broker starting...")
     print(f"   Agent URL: {AGENT_URL}")
     print(f"   LLM Auditor: {'ENABLED' if INGRESS_AUDITOR else 'DISABLED'}")
+    print(f"   LLM Firewall: {'ENABLED' if ENABLE_LLM_FIREWALL else 'DISABLED'}")
+    if firewall.llm_classifier and firewall.llm_classifier.enabled:
+        print(f"   PromptShield: ✅ Ready on {firewall.llm_classifier.device}")
+    elif ENABLE_LLM_FIREWALL:
+        print("   PromptShield: ⚠️  Failed to load (regex-only mode)")
     print(f"   Log file: {LOG_FILE}")
     print("✅ Broker ready!")
 
