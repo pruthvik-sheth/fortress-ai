@@ -1,0 +1,2 @@
+{"timestamp": "2025-10-03T19:25:28.952457Z", "event_type": "proxy_block", "agent_id": "test", "url": "https://pastebin.com/evil", "method": "POST", "score": 70.0, "reasons": ["denylisted_domain:pastebin.com"], "action": "BLOCK", "watch": false, "latency_ms": 0}
+{"timestamp": "2025-10-03T19:25:45.959686Z", "event_type": "proxy_quarantine", "agent_id": "test", "url": "https://example.org/upload", "method": "POST", "score": 100.0, "reasons": ["secret_pattern", "suspicious_purpose"], "action": "QUARANTINE", "watch": false, "latency_ms": 4}

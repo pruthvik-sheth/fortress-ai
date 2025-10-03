@@ -402,66 +402,29 @@ async def health_check():
 
 @app.post("/compliance/generate")
 async def generate_compliance_report():
-    """Generate compliance evidence pack."""
-    now = time.time()
-    recent_incidents = [i for i in incidents if now - i["ts"] < 86400]
+    """Generate professional compliance evidence pack."""
+    from compliance import ComplianceGenerator
+    
+    # Use the advanced compliance generator
+    compliance_gen = ComplianceGenerator("data/incidents.jsonl")
     
     # Calculate health score
-    health_score = 100
-    for incident in recent_incidents:
-        score_impact = max(0, (incident["score"] - 40) * 0.2)
-        health_score -= score_impact
-    health_score = max(0, min(100, health_score))
+    health_score = compliance_gen.calculate_health_score()
     
-    # Generate HTML report
-    html_report = f"""
-    <html>
-    <head><title>AI Agent Defense - Compliance Report</title></head>
-    <body>
-    <h1>AI Agent Defense System - Security Report</h1>
-    <p>Generated: {datetime.fromtimestamp(now).isoformat()}</p>
+    # Generate professional HTML report
+    html_report = compliance_gen.generate_evidence_pack(
+        health_score=health_score,
+        agents_seen=len(agent_baselines),
+        quarantined_agents=list(quarantined_agents)
+    )
     
-    <h2>Summary</h2>
-    <ul>
-        <li>Health Score: {health_score:.1f}/100</li>
-        <li>Agents Monitored: {len(agent_baselines)}</li>
-        <li>Total Incidents (24h): {len(recent_incidents)}</li>
-        <li>Quarantined Agents: {len(quarantined_agents)}</li>
-        <li>Denylist Domains: {len(DENYLIST_DOMAINS)}</li>
-    </ul>
-    
-    <h2>Recent Incidents</h2>
-    <table border="1">
-        <tr><th>Time</th><th>Agent</th><th>Score</th><th>Action</th><th>Reasons</th></tr>
-    """
-    
-    for incident in recent_incidents[-20:]:  # Last 20 incidents
-        timestamp = datetime.fromtimestamp(incident["ts"]).strftime("%H:%M:%S")
-        html_report += f"""
-        <tr>
-            <td>{timestamp}</td>
-            <td>{incident["agent_id"]}</td>
-            <td>{incident["score"]}</td>
-            <td>{incident["action"]}</td>
-            <td>{'; '.join(incident["reasons"])}</td>
-        </tr>
-        """
-    
-    html_report += """
-    </table>
-    
-    <h2>Current Denylist</h2>
-    <ul>
-    """
-    
-    for domain in sorted(DENYLIST_DOMAINS):
-        html_report += f"<li>{domain}</li>"
-    
-    html_report += """
-    </ul>
-    </body>
-    </html>
-    """
+    # Save to file
+    try:
+        os.makedirs("data", exist_ok=True)
+        with open("data/evidence_pack.html", "w", encoding="utf-8") as f:
+            f.write(html_report)
+    except Exception as e:
+        print(f"Error saving evidence pack: {e}")
     
     return {"html": html_report}
 

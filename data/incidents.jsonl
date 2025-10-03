@@ -1,0 +1,2 @@
+{"timestamp": "2025-10-03T19:25:28.955551Z", "event_type": "security_incident", "agent_id": "test", "url": "https://pastebin.com/evil", "method": "POST", "score": 70.0, "action": "BLOCK", "reasons": ["denylisted_domain:pastebin.com"]}
+{"timestamp": "2025-10-03T19:25:45.963596Z", "event_type": "security_incident", "agent_id": "test", "url": "https://example.org/upload", "method": "POST", "score": 100.0, "action": "QUARANTINE", "reasons": ["secret_pattern", "suspicious_purpose"]}

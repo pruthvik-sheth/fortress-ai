@@ -1,272 +1,404 @@
+"""
+ShieldForce AI - Ingress Broker
+Front door security for AI agents
+"""
+
 import os
-import re
 import json
-import time
 import hashlib
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
-import jwt
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Optional
+import uuid
+
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 import httpx
-from fastapi import FastAPI, HTTPException, Header, Request
-from pydantic import BaseModel
 
-app = FastAPI(title="Ingress Broker", version="1.0.0")
+from firewall import PromptFirewall
+from jwt_utils import CapabilityTokenManager
 
-# Environment configuration
+# ============================================
+# MODELS (inlined from shared)
+# ============================================
+
+class InvokeRequest(BaseModel):
+    """Request to invoke an agent"""
+    agent_id: str = Field(..., description="Unique agent identifier")
+    purpose: str = Field(..., description="Purpose of invocation")
+    user_text: str = Field(..., description="User input text to process")
+    attachments: list[dict] = Field(default_factory=list, description="Optional attachments")
+    allowed_tools: list[str] = Field(..., description="Tools agent is allowed to use")
+    data_scope: list[str] = Field(..., description="Data scopes agent can access")
+    budgets: dict = Field(
+        default_factory=lambda: {"max_tokens": 1500, "max_tool_calls": 3},
+        description="Resource budgets"
+    )
+    request_id: Optional[str] = Field(None, description="Optional request correlation ID")
+
+
+class InvokeResponse(BaseModel):
+    """Response from broker"""
+    decision: str = Field(..., description="ALLOW or BLOCK")
+    reason: Optional[str] = Field(None, description="Reason for decision")
+    result: Optional[dict] = Field(None, description="Agent result if allowed")
+    request_id: Optional[str] = Field(None, description="Request correlation ID")
+
+
+# ============================================
+# LOGGING UTILS (inlined from shared)
+# ============================================
+
+def hash_api_key(api_key: str) -> str:
+    """Hash API key for logging (SHA256)"""
+    return hashlib.sha256(api_key.encode()).hexdigest()[:16]
+
+
+def log_event(
+    log_file: str,
+    event_type: str,
+    data: dict[str, Any],
+    mask_fields: list[str] | None = None
+) -> None:
+    """Append event to JSONL log file"""
+    # Ensure data directory exists
+    log_path = Path(log_file)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Build log entry
+    entry = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "event_type": event_type,
+        **data
+    }
+    
+    # Mask sensitive fields
+    if mask_fields:
+        for field in mask_fields:
+            if field in entry and entry[field]:
+                entry[field] = "***MASKED***"
+    
+    # Append to file
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        # Fail gracefully - don't break the request
+        print(f"Warning: Failed to write log: {e}")
+
+# ============================================
+# CONFIGURATION
+# ============================================
+
 PORT = int(os.getenv("PORT", "8001"))
 BROKER_API_KEY = os.getenv("BROKER_API_KEY", "DEMO-KEY")
 CAPABILITY_SECRET = os.getenv("CAPABILITY_SECRET", "dev-secret")
-AGENT_URL = "http://agent:7000"
+AGENT_URL = os.getenv("AGENT_URL", "http://agent:7000")
+INGRESS_AUDITOR = os.getenv("INGRESS_AUDITOR", "off") == "on"
 
-# Simple RBAC mapping: API key -> allowed agent IDs
-API_KEY_PERMISSIONS = {
-    "DEMO-KEY": ["customer-bot", "support-agent", "data-analyst"],
+LOG_FILE = "data/broker_log.jsonl"
+
+# ============================================
+# INITIALIZE
+# ============================================
+
+app = FastAPI(title="ShieldForce Ingress Broker", version="0.1.0")
+
+firewall = PromptFirewall()
+token_manager = CapabilityTokenManager(CAPABILITY_SECRET)
+
+# Simple RBAC: API key -> allowed agent IDs
+# In production, this would be in a database
+RBAC_MAP = {
+    "DEMO-KEY": ["customer-bot", "support-agent", "data-analyst", "*"],
     "ADMIN-KEY": ["*"]  # Admin can access any agent
 }
 
-class InvokeRequest(BaseModel):
-    agent_id: str
-    purpose: str
-    user_text: str
-    allowed_tools: List[str]
-    data_scope: List[str]
-    budgets: Optional[Dict[str, int]] = None
-    request_id: Optional[str] = None
+# ============================================
+# ENDPOINTS
+# ============================================
 
-class BlockedResponse(BaseModel):
-    decision: str
-    reason: str
-    timestamp: float
-
-def hash_api_key(api_key: str) -> str:
-    """Hash API key for logging (privacy)."""
-    return hashlib.sha256(api_key.encode()).hexdigest()[:12]
-
-def log_event(event_data: Dict[str, Any]):
-    """Append event to broker log file."""
-    try:
-        os.makedirs("data", exist_ok=True)
-        with open("data/broker_log.jsonl", "a") as f:
-            f.write(json.dumps(event_data) + "\n")
-    except Exception as e:
-        print(f"Logging error: {e}")
-
-def validate_api_key(api_key: str, agent_id: str) -> bool:
-    """Validate API key and check agent access permissions."""
-    if api_key not in API_KEY_PERMISSIONS:
-        return False
-    
-    allowed_agents = API_KEY_PERMISSIONS[api_key]
-    return "*" in allowed_agents or agent_id in allowed_agents
-
-def detect_instruction_override(text: str) -> Optional[str]:
-    """Detect prompt injection attempts."""
-    dangerous_patterns = [
-        r'ignore\s+previous\s+instructions?',
-        r'reveal\s+(?:your\s+)?system\s+prompt',
-        r'dump\s+(?:your\s+)?memory',
-        r'bypass\s+(?:all\s+)?(?:safety|security)',
-        r'jailbreak',
-        r'disable\s+safety',
-        r'forget\s+(?:your\s+)?(?:instructions?|rules?)',
-        r'act\s+as\s+(?:if\s+)?you\s+are\s+not',
-        r'pretend\s+(?:that\s+)?you\s+are\s+not'
-    ]
-    
-    text_lower = text.lower()
-    for pattern in dangerous_patterns:
-        if re.search(pattern, text_lower):
-            return f"instruction_override: {pattern}"
-    
-    return None
-
-def strip_html_and_scripts(text: str) -> str:
-    """Remove HTML tags and script content."""
-    # Remove script tags and content
-    text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL | re.IGNORECASE)
-    # Remove HTML tags
-    text = re.sub(r'<[^>]+>', '', text)
-    return text
-
-def detect_and_redact_secrets(text: str) -> tuple[str, List[str]]:
-    """Detect and redact common secret patterns."""
-    redactions = []
-    
-    # AWS keys
-    aws_pattern = r'AKIA[0-9A-Z]{16}'
-    if re.search(aws_pattern, text):
-        text = re.sub(aws_pattern, '***AWS_KEY_REDACTED***', text)
-        redactions.append("aws_access_key")
-    
-    # Generic API keys
-    api_key_pattern = r'(?:api[_-]?key|apikey|token)["\s]*[:=]["\s]*([a-zA-Z0-9_-]{20,})'
-    if re.search(api_key_pattern, text, re.IGNORECASE):
-        text = re.sub(api_key_pattern, r'api_key=***REDACTED***', text, flags=re.IGNORECASE)
-        redactions.append("api_key")
-    
-    # PEM certificates/keys
-    pem_pattern = r'-----BEGIN [A-Z ]+-----.*?-----END [A-Z ]+-----'
-    if re.search(pem_pattern, text, re.DOTALL):
-        text = re.sub(pem_pattern, '***PEM_REDACTED***', text, flags=re.DOTALL)
-        redactions.append("pem_certificate")
-    
-    # Simple SSN pattern
-    ssn_pattern = r'\b\d{3}-\d{2}-\d{4}\b'
-    if re.search(ssn_pattern, text):
-        text = re.sub(ssn_pattern, '***SSN_REDACTED***', text)
-        redactions.append("ssn")
-    
-    return text, redactions
-
-def create_capability_jwt(agent_id: str, tools: List[str], scopes: List[str], budgets: Dict[str, Any]) -> str:
-    """Create a capability JWT for the agent."""
-    now = datetime.utcnow()
-    payload = {
-        "iss": "broker",
-        "aud": "agent", 
-        "sub": agent_id,
-        "tools": tools,
-        "scopes": scopes,
-        "budgets": budgets or {},
-        "iat": now,
-        "exp": now + timedelta(minutes=5)
+@app.get("/health")
+async def health():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "service": "ingress-broker",
+        "version": "0.1.0"
     }
-    
-    return jwt.encode(payload, CAPABILITY_SECRET, algorithm="HS256")
+
 
 @app.post("/invoke")
-async def invoke_agent(
+async def invoke(
     request: InvokeRequest,
-    x_api_key: str = Header(..., alias="X-API-Key")
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key")
 ):
-    """Main broker endpoint - validates requests and forwards to agent."""
-    start_time = time.time()
-    request_id = request.request_id or f"req_{int(time.time() * 1000)}"
+    """
+    Main entry point for agent invocation
     
-    # Authentication & RBAC
-    if not validate_api_key(x_api_key, request.agent_id):
-        log_event({
-            "ts": time.time(),
-            "caller_hash": hash_api_key(x_api_key),
-            "agent_id": request.agent_id,
-            "decision": "AUTH_FAILED",
-            "reason": "invalid_api_key_or_agent_access",
-            "request_id": request_id
-        })
-        raise HTTPException(status_code=403, detail="Invalid API key or agent access denied")
+    Security checks:
+    1. API key authentication
+    2. RBAC (role-based access control)
+    3. Envelope validation
+    4. Prompt firewall
+    5. Secret redaction
+    6. JWT capability token issuance
+    """
     
-    # Envelope validation
-    if not request.purpose or not request.user_text or not request.allowed_tools:
-        log_event({
-            "ts": time.time(),
-            "caller_hash": hash_api_key(x_api_key),
-            "agent_id": request.agent_id,
-            "decision": "VALIDATION_FAILED",
-            "reason": "missing_required_fields",
-            "request_id": request_id
-        })
-        raise HTTPException(status_code=400, detail="Missing required fields: purpose, user_text, allowed_tools")
+    request_id = request.request_id or str(uuid.uuid4())
     
-    # Prompt firewall - instruction override detection
-    override_reason = detect_instruction_override(request.user_text)
-    if override_reason:
-        log_event({
-            "ts": time.time(),
-            "caller_hash": hash_api_key(x_api_key),
-            "agent_id": request.agent_id,
-            "decision": "BLOCK",
-            "reason": override_reason,
-            "request_id": request_id
-        })
-        return BlockedResponse(
-            decision="BLOCK",
-            reason=override_reason,
-            timestamp=time.time()
+    # ============================================
+    # 1. AUTHENTICATION
+    # ============================================
+    
+    if not x_api_key:
+        log_event(
+            LOG_FILE,
+            "auth_failed",
+            {
+                "reason": "missing_api_key",
+                "agent_id": request.agent_id,
+                "request_id": request_id
+            }
+        )
+        raise HTTPException(status_code=401, detail="Missing X-API-Key header")
+    
+    if x_api_key not in RBAC_MAP:
+        log_event(
+            LOG_FILE,
+            "auth_failed",
+            {
+                "reason": "invalid_api_key",
+                "api_key_hash": hash_api_key(x_api_key),
+                "agent_id": request.agent_id,
+                "request_id": request_id
+            }
+        )
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    # ============================================
+    # 2. RBAC
+    # ============================================
+    
+    allowed_agents = RBAC_MAP[x_api_key]
+    
+    if "*" not in allowed_agents and request.agent_id not in allowed_agents:
+        log_event(
+            LOG_FILE,
+            "rbac_denied",
+            {
+                "api_key_hash": hash_api_key(x_api_key),
+                "agent_id": request.agent_id,
+                "allowed_agents": allowed_agents,
+                "request_id": request_id
+            }
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=f"Not authorized to access agent {request.agent_id}"
         )
     
-    # Input sanitization
-    sanitized_text = strip_html_and_scripts(request.user_text)
+    # ============================================
+    # 3. ENVELOPE VALIDATION
+    # ============================================
     
-    # Length check
-    if len(sanitized_text) > 10000:
-        log_event({
-            "ts": time.time(),
-            "caller_hash": hash_api_key(x_api_key),
-            "agent_id": request.agent_id,
-            "decision": "BLOCK",
-            "reason": "text_too_long",
-            "text_length": len(sanitized_text),
-            "request_id": request_id
-        })
-        return BlockedResponse(
+    # Pydantic already validates required fields
+    # Additional validation can go here
+    
+    if not request.user_text.strip():
+        log_event(
+            LOG_FILE,
+            "validation_failed",
+            {
+                "reason": "empty_user_text",
+                "agent_id": request.agent_id,
+                "request_id": request_id
+            }
+        )
+        raise HTTPException(status_code=400, detail="user_text cannot be empty")
+    
+    # ============================================
+    # 4. PROMPT FIREWALL
+    # ============================================
+    
+    is_safe, block_reason, redactions = firewall.check(request.user_text)
+    
+    if not is_safe:
+        log_event(
+            LOG_FILE,
+            "firewall_blocked",
+            {
+                "reason": block_reason,
+                "agent_id": request.agent_id,
+                "api_key_hash": hash_api_key(x_api_key),
+                "user_text_preview": request.user_text[:100],
+                "request_id": request_id
+            }
+        )
+        
+        return InvokeResponse(
             decision="BLOCK",
-            reason="text_too_long",
-            timestamp=time.time()
+            reason=block_reason,
+            request_id=request_id
         )
     
-    # Secret detection and redaction
-    redacted_text, redactions = detect_and_redact_secrets(sanitized_text)
+    # ============================================
+    # 5. SECRET REDACTION
+    # ============================================
     
-    # Create capability JWT
-    capability_token = create_capability_jwt(
-        request.agent_id,
-        request.allowed_tools,
-        request.data_scope,
-        request.budgets
+    sanitized_text = firewall.sanitize(request.user_text)
+    
+    if redactions:
+        log_event(
+            LOG_FILE,
+            "secrets_redacted",
+            {
+                "redactions": redactions,
+                "agent_id": request.agent_id,
+                "request_id": request_id
+            }
+        )
+    
+    # ============================================
+    # 6. JWT CAPABILITY TOKEN
+    # ============================================
+    
+    capability_token = token_manager.issue_token(
+        agent_id=request.agent_id,
+        allowed_tools=request.allowed_tools,
+        data_scope=request.data_scope,
+        budgets=request.budgets
     )
     
-    # Forward to agent
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        try:
+    # ============================================
+    # 7. FORWARD TO AGENT
+    # ============================================
+    
+    agent_request = {
+        "agent_id": request.agent_id,
+        "purpose": request.purpose,
+        "user_text": sanitized_text,  # Send sanitized version
+        "attachments": request.attachments,
+        "budgets": request.budgets,
+        "request_id": request_id
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 f"{AGENT_URL}/_internal/run",
+                json=agent_request,
                 headers={
                     "Authorization": f"Bearer {capability_token}",
                     "Content-Type": "application/json"
-                },
-                json={
-                    "agent_id": request.agent_id,
-                    "purpose": request.purpose,
-                    "user_text": redacted_text,
-                    "request_id": request_id
                 }
             )
-            response.raise_for_status()
-            agent_response = response.json()
             
-            # Log successful invoke
-            log_event({
-                "ts": time.time(),
-                "caller_hash": hash_api_key(x_api_key),
+            if response.status_code != 200:
+                log_event(
+                    LOG_FILE,
+                    "agent_error",
+                    {
+                        "status_code": response.status_code,
+                        "agent_id": request.agent_id,
+                        "request_id": request_id
+                    }
+                )
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Agent returned error: {response.text}"
+                )
+            
+            agent_result = response.json()
+            
+    except httpx.TimeoutException:
+        log_event(
+            LOG_FILE,
+            "agent_timeout",
+            {
                 "agent_id": request.agent_id,
-                "decision": "INVOKE_ALLOWED",
-                "redactions": redactions,
-                "processing_time_ms": round((time.time() - start_time) * 1000, 2),
                 "request_id": request_id
-            })
-            
-            return agent_response
-            
-        except httpx.HTTPError as e:
-            log_event({
-                "ts": time.time(),
-                "caller_hash": hash_api_key(x_api_key),
+            }
+        )
+        raise HTTPException(status_code=504, detail="Agent timeout")
+    
+    except httpx.RequestError as e:
+        log_event(
+            LOG_FILE,
+            "agent_unreachable",
+            {
+                "error": str(e),
                 "agent_id": request.agent_id,
-                "decision": "AGENT_ERROR",
-                "reason": str(e),
                 "request_id": request_id
-            })
-            raise HTTPException(status_code=502, detail=f"Agent communication failed: {str(e)}")
+            }
+        )
+        raise HTTPException(status_code=503, detail="Agent unreachable")
+    
+    # ============================================
+    # 8. LOG SUCCESS
+    # ============================================
+    
+    log_event(
+        LOG_FILE,
+        "invoke_allowed",
+        {
+            "agent_id": request.agent_id,
+            "api_key_hash": hash_api_key(x_api_key),
+            "purpose": request.purpose,
+            "redactions": redactions,
+            "tokens_used": agent_result.get("tokens_used", 0),
+            "tool_calls": agent_result.get("tool_calls", 0),
+            "request_id": request_id
+        }
+    )
+    
+    # ============================================
+    # 9. RETURN RESULT
+    # ============================================
+    
+    return InvokeResponse(
+        decision="ALLOW",
+        result=agent_result,
+        request_id=request_id
+    )
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint."""
-    return {
-        "status": "healthy",
-        "service": "broker",
-        "agent_url": AGENT_URL,
-        "timestamp": time.time()
-    }
+
+# ============================================
+# ERROR HANDLERS
+# ============================================
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch-all exception handler"""
+    log_event(
+        LOG_FILE,
+        "internal_error",
+        {
+            "error": str(exc),
+            "path": request.url.path
+        }
+    )
+    
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"}
+    )
+
+
+# ============================================
+# STARTUP
+# ============================================
+
+@app.on_event("startup")
+async def startup():
+    """Initialize on startup"""
+    print("🛡️  ShieldForce Ingress Broker starting...")
+    print(f"   Agent URL: {AGENT_URL}")
+    print(f"   LLM Auditor: {'ENABLED' if INGRESS_AUDITOR else 'DISABLED'}")
+    print(f"   Log file: {LOG_FILE}")
+    print("✅ Broker ready!")
+
 
 if __name__ == "__main__":
     import uvicorn

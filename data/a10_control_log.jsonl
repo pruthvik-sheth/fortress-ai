@@ -1,0 +1,1 @@
+{"timestamp": "2025-10-03T19:25:45.955584Z", "event_type": "apply_waf_quarantine", "agent_id": "test", "reason": "secret_exfiltration_detected", "score": 100.0}
