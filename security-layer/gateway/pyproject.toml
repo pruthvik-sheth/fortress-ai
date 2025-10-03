@@ -1,0 +1,31 @@
+[project]
+name = "shieldforce-gateway"
+version = "0.1.0"
+description = "ShieldForce AI Egress Gateway - Back door security for AI agents"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.104.1",
+    "uvicorn[standard]>=0.24.0",
+    "httpx>=0.25.1",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.3",
+    "pytest-asyncio>=0.21.1",
+    "httpx>=0.25.1",
+]
+llm = [
+    "openai>=1.3.5",
+    "vllm>=0.2.6",
+    "sentence-transformers>=2.2.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]

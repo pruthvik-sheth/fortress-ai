@@ -1,0 +1,1 @@
+# ShieldForce AI - Shared Utilities
