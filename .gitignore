@@ -41,5 +41,8 @@ Thumbs.db
 # Logs
 *.log
 logs/
+*.jsonl
 data/*.jsonl
+broker/data/*.jsonl
+gateway/data/*.jsonl
 !data/.gitkeep
