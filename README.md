@@ -26,7 +26,7 @@ External → 🛡️ Broker (Firewall) → 🤖 Agent (Sandbox) → 🚪 Gateway
 
 ## 🚀 Quick Start
 
-See [QUICKSTART.md](QUICKSTART.md) for detailed setup instructions.
+See **[docs/QUICKSTART.md](docs/QUICKSTART.md)** for detailed setup instructions.
 
 ### Prerequisites
 - Docker Desktop
@@ -130,9 +130,10 @@ curl -s -X POST http://localhost:9000/compliance/generate | jq -r .html | head -
 
 ## 📋 Documentation
 
-- **[QUICKSTART.md](QUICKSTART.md)** - Setup and testing guide
-- **[PROJECT_PLAN.md](PROJECT_PLAN.md)** - Implementation details
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - System architecture (detailed)
+- **[QUICKSTART.md](docs/QUICKSTART.md)** - Setup and testing guide
+- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** - System architecture (detailed)
+- **[PROJECT_PLAN.md](docs/PROJECT_PLAN.md)** - Implementation details
+- **[IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)** - Development phases
 
 ## 🎯 Use Cases
 
