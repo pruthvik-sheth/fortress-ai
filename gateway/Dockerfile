@@ -11,6 +11,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY app.py .
+COPY banking_security.py .
+COPY compliance.py .
+
+# Copy config directory
+COPY config/ ./config/
 
 EXPOSE 9000
 

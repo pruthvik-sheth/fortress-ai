@@ -6,6 +6,8 @@ Front door security for AI agents
 import os
 import json
 import hashlib
+import time
+import random
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -19,6 +21,11 @@ import httpx
 
 from firewall import PromptFirewall
 from jwt_utils import CapabilityTokenManager
+from banking_utils import (
+    load_banking_policy, detect_pan_in_text, detect_cvv_in_text, 
+    redact_sensitive_data, generate_otp_code, store_otp, verify_otp,
+    is_payment_request, extract_payment_details, cleanup_expired_otps
+)
 
 # ============================================
 # MODELS (inlined from shared)
@@ -45,6 +52,29 @@ class InvokeResponse(BaseModel):
     reason: Optional[str] = Field(None, description="Reason for decision")
     result: Optional[dict] = Field(None, description="Agent result if allowed")
     request_id: Optional[str] = Field(None, description="Request correlation ID")
+    message: Optional[str] = Field(None, description="User-friendly message for blocks")
+
+class OTPSendRequest(BaseModel):
+    """Request to send OTP"""
+    phone_number: Optional[str] = Field(None, description="Phone number (optional for demo)")
+    purpose: str = Field(..., description="Purpose of OTP (e.g., payment_verification)")
+
+class OTPSendResponse(BaseModel):
+    """Response from OTP send"""
+    sent: bool = Field(..., description="Whether OTP was sent")
+    channel: str = Field(..., description="Channel used (sms, email)")
+    challenge_id: str = Field(..., description="Challenge ID for verification")
+    expires_in: int = Field(..., description="Expiry time in seconds")
+
+class OTPVerifyRequest(BaseModel):
+    """Request to verify OTP"""
+    challenge_id: str = Field(..., description="Challenge ID from send request")
+    code: str = Field(..., description="OTP code to verify")
+
+class OTPVerifyResponse(BaseModel):
+    """Response from OTP verification"""
+    verified: bool = Field(..., description="Whether OTP was verified")
+    reason: Optional[str] = Field(None, description="Reason if verification failed")
 
 
 # ============================================
@@ -101,6 +131,9 @@ ENABLE_LLM_FIREWALL = os.getenv("ENABLE_LLM_FIREWALL", "true").lower() == "true"
 
 LOG_FILE = "data/broker_log.jsonl"
 
+# Load banking policy
+BANKING_POLICY = load_banking_policy()
+
 # ============================================
 # INITIALIZE
 # ============================================
@@ -119,12 +152,11 @@ app.add_middleware(
 firewall = PromptFirewall(enable_llm=ENABLE_LLM_FIREWALL)
 token_manager = CapabilityTokenManager(CAPABILITY_SECRET)
 
-# Simple RBAC: API key -> allowed agent IDs
-# In production, this would be in a database
-RBAC_MAP = {
-    "DEMO-KEY": ["customer-bot", "support-agent", "data-analyst", "*"],
-    "ADMIN-KEY": ["*"]  # Admin can access any agent
-}
+# RBAC from banking policy
+RBAC_MAP = BANKING_POLICY.get("rbac", {
+    "DEMO-KEY": ["cust-support-bot"],
+    "BANKING-KEY": ["cust-support-bot", "payment-bot"]
+})
 
 # ============================================
 # ENDPOINTS
@@ -136,8 +168,76 @@ async def health():
     return {
         "status": "healthy",
         "service": "ingress-broker",
-        "version": "0.1.0"
+        "version": "0.1.0",
+        "banking_mode": True
     }
+
+@app.post("/otp/send", response_model=OTPSendResponse)
+async def send_otp(request: OTPSendRequest):
+    """
+    Send OTP for verification (mock implementation)
+    """
+    # Clean up expired OTPs
+    cleanup_expired_otps()
+    
+    # Generate OTP
+    otp_settings = BANKING_POLICY.get("otp_settings", {})
+    code_length = otp_settings.get("code_length", 6)
+    expiry_seconds = otp_settings.get("expiry_seconds", 300)
+    
+    code = generate_otp_code(code_length)
+    challenge_id = f"otp_{int(time.time())}_{random.randint(1000, 9999)}"
+    
+    # Store OTP
+    store_otp(challenge_id, code, expiry_seconds)
+    
+    # Log OTP send (without the actual code)
+    log_event(
+        LOG_FILE,
+        "otp_sent",
+        {
+            "challenge_id": challenge_id,
+            "purpose": request.purpose,
+            "phone_number": request.phone_number,
+            "expires_in": expiry_seconds
+        }
+    )
+    
+    # In a real implementation, send SMS/email here
+    print(f"🔐 OTP Code for demo: {code} (Challenge ID: {challenge_id})")
+    
+    return OTPSendResponse(
+        sent=True,
+        channel="sms",
+        challenge_id=challenge_id,
+        expires_in=expiry_seconds
+    )
+
+@app.post("/otp/verify", response_model=OTPVerifyResponse)
+async def verify_otp_endpoint(request: OTPVerifyRequest):
+    """
+    Verify OTP code
+    """
+    otp_settings = BANKING_POLICY.get("otp_settings", {})
+    max_attempts = otp_settings.get("max_attempts", 3)
+    
+    success, reason = verify_otp(request.challenge_id, request.code, max_attempts)
+    
+    # Log verification attempt
+    log_event(
+        LOG_FILE,
+        "otp_verified" if success else "otp_failed",
+        {
+            "challenge_id": request.challenge_id,
+            "success": success,
+            "reason": reason
+        }
+    )
+    
+    return OTPVerifyResponse(
+        verified=success,
+        reason=None if success else reason
+    )
 
 
 @app.post("/invoke")
@@ -230,7 +330,37 @@ async def invoke(
         raise HTTPException(status_code=400, detail="user_text cannot be empty")
     
     # ============================================
-    # 4. PROMPT FIREWALL (Multi-Layer)
+    # 4. BANKING SECURITY CHECKS (PAN/CVV Detection)
+    # ============================================
+    
+    # Check for PAN in user input
+    detected_pans = detect_pan_in_text(request.user_text)
+    detected_cvvs = detect_cvv_in_text(request.user_text)
+    
+    if detected_pans or detected_cvvs:
+        log_event(
+            LOG_FILE,
+            "pan_in_chat",
+            {
+                "reason": "pan_or_cvv_detected",
+                "agent_id": request.agent_id,
+                "api_key_hash": hash_api_key(x_api_key),
+                "user_text_preview": request.user_text[:100],
+                "detected_pans": len(detected_pans),
+                "detected_cvvs": len(detected_cvvs),
+                "request_id": request_id
+            }
+        )
+        
+        return InvokeResponse(
+            decision="BLOCK",
+            reason="pan_in_chat",
+            message="For your security, I can't process card numbers in chat. I can send a secure pay link or do a transfer to a pre-approved payee (≤ $5,000) after verification.",
+            request_id=request_id
+        )
+    
+    # ============================================
+    # 5. PROMPT FIREWALL (Multi-Layer)
     # ============================================
     
     is_safe, block_reason, redactions, llm_result = firewall.check(request.user_text)
@@ -264,7 +394,7 @@ async def invoke(
         )
     
     # ============================================
-    # 5. SECRET REDACTION
+    # 6. SECRET REDACTION
     # ============================================
     
     sanitized_text = firewall.sanitize(request.user_text)
@@ -281,15 +411,37 @@ async def invoke(
         )
     
     # ============================================
-    # 6. JWT CAPABILITY TOKEN
+    # 7. BANKING CAPABILITY SCOPING
     # ============================================
     
-    capability_token = token_manager.issue_token(
-        agent_id=request.agent_id,
-        allowed_tools=request.allowed_tools,
-        data_scope=request.data_scope,
-        budgets=request.budgets
-    )
+    # Determine if this is a payment request and scope accordingly
+    payment_details = None
+    if is_payment_request(request.user_text):
+        payment_details = extract_payment_details(request.user_text)
+        
+        # For payment requests, use restricted banking tools
+        banking_tools = ["payments.create", "accounts.read", "transactions.read"]
+        banking_scopes = ["accounts:owner_only", "transactions:last_90d", "payments:preapproved_only"]
+        banking_budgets = {"max_tokens": 300, "max_tool_calls": 3}
+        
+        capability_token = token_manager.issue_token(
+            agent_id=request.agent_id,
+            allowed_tools=banking_tools,
+            data_scope=banking_scopes,
+            budgets=banking_budgets,
+            payment_policy=BANKING_POLICY.get("payment_limits", {}),
+            payment_details=payment_details
+        )
+    else:
+        # Default service tools for general banking queries
+        default_tools = ["accounts.read", "transactions.read", "secure_paylink.create", "http.fetch"]
+        
+        capability_token = token_manager.issue_token(
+            agent_id=request.agent_id,
+            allowed_tools=request.allowed_tools or default_tools,
+            data_scope=request.data_scope,
+            budgets=request.budgets
+        )
     
     # ============================================
     # 7. FORWARD TO AGENT

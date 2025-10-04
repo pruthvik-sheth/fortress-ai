@@ -11,6 +11,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY app.py .
+COPY banking_agent.py .
+
+# Copy config directory
+COPY config/ ./config/
 
 # Change ownership to non-root user
 RUN chown -R appuser:appuser /app

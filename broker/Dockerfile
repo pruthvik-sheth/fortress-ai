@@ -26,6 +26,10 @@ RUN if [ "$ENABLE_LLM_BUILD" = "true" ]; then \
 COPY app.py .
 COPY firewall.py .
 COPY jwt_utils.py .
+COPY banking_utils.py .
+
+# Copy config directory
+COPY config/ ./config/
 
 # Create data directory
 RUN mkdir -p /app/data

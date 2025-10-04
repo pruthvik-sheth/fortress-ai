@@ -29,7 +29,9 @@ class CapabilityTokenManager:
         agent_id: str,
         allowed_tools: list[str],
         data_scope: list[str],
-        budgets: dict
+        budgets: dict,
+        payment_policy: dict = None,
+        payment_details: dict = None
     ) -> str:
         """
         Issue a capability token for an agent
@@ -39,6 +41,8 @@ class CapabilityTokenManager:
             allowed_tools: List of tools agent can use
             data_scope: List of data scopes agent can access
             budgets: Resource budgets (max_tokens, max_tool_calls)
+            payment_policy: Banking payment policy (optional)
+            payment_details: Extracted payment details (optional)
             
         Returns:
             JWT token string
@@ -55,6 +59,13 @@ class CapabilityTokenManager:
             "iat": now,
             "exp": now + self.token_ttl
         }
+        
+        # Add banking-specific fields if provided
+        if payment_policy:
+            payload["payment_policy"] = payment_policy
+        
+        if payment_details:
+            payload["payment_details"] = payment_details
         
         token = jwt.encode(payload, self.secret, algorithm=self.algorithm)
         return token

@@ -1,0 +1,26 @@
+{
+  "ACME-LLC": {
+    "id": "p_1001",
+    "name": "ACME LLC",
+    "account_type": "business",
+    "verified": true
+  },
+  "UTILS-CO": {
+    "id": "p_1002", 
+    "name": "Utilities Co",
+    "account_type": "utility",
+    "verified": true
+  },
+  "RENT-CORP": {
+    "id": "p_1003",
+    "name": "Rent Corp",
+    "account_type": "property",
+    "verified": true
+  },
+  "GROCERY-MART": {
+    "id": "p_1004",
+    "name": "Grocery Mart",
+    "account_type": "merchant",
+    "verified": true
+  }
+}

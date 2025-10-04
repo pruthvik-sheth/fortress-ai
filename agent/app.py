@@ -8,6 +8,11 @@ import httpx
 from fastapi import FastAPI, HTTPException, Header, Request
 from pydantic import BaseModel
 
+from banking_agent import (
+    validate_payment_request, format_account_balance, format_transaction_list,
+    generate_secure_paylink, mock_account_data, mock_transaction_data
+)
+
 app = FastAPI(title="AI Agent", version="1.0.0")
 
 # Environment configuration
@@ -25,6 +30,8 @@ class AgentRequest(BaseModel):
 class AgentResponse(BaseModel):
     answer: str
     fetch_decision: Optional[Dict[str, Any]] = None
+    payment_result: Optional[Dict[str, Any]] = None
+    account_data: Optional[Dict[str, Any]] = None
     logs: Dict[str, Any]
 
 def verify_capability_jwt(token: str) -> Dict[str, Any]:
@@ -111,48 +118,196 @@ async def run_agent(
     # Extract allowed tools from JWT
     allowed_tools = capabilities.get("tools", [])
     
-    # Check for FETCH requests
-    fetch_url = extract_fetch_url(request.user_text)
+    # Initialize response components
     fetch_decision = None
+    payment_result = None
+    account_data = None
+    llm_answer = ""
     
-    if fetch_url:
-        if "http.fetch" not in allowed_tools:
+    # ============================================
+    # BANKING OPERATIONS HANDLING
+    # ============================================
+    
+    user_text_lower = request.user_text.lower()
+    
+    # Check for fetch/export requests FIRST (higher priority than account queries)
+    fetch_url = extract_fetch_url(request.user_text)
+    
+    # Handle general fetch requests (including data exfiltration attempts)
+    if fetch_url or any(keyword in user_text_lower for keyword in ["export", "fetch", "send to", "upload to"]):
+        if not fetch_url:
+            # Try to extract URL from export/send commands
+            import re
+            url_match = re.search(r'https?://[^\s]+', request.user_text)
+            if url_match:
+                fetch_url = url_match.group()
+        
+        if fetch_url:
+            if "http.fetch" not in allowed_tools:
+                raise HTTPException(
+                    status_code=403, 
+                    detail="HTTP fetch not allowed - missing 'http.fetch' capability"
+                )
+            
+            # Extract any body content for the fetch
+            body_match = re.search(r'with\s+(.+)', request.user_text, re.IGNORECASE)
+            fetch_body = body_match.group(1) if body_match else ""
+            
+            # Call Gateway proxy
+            fetch_decision = await call_gateway_proxy(
+                request.agent_id, 
+                fetch_url, 
+                request.purpose,
+                fetch_body
+            )
+            
+            if fetch_decision.get("status") == "ALLOW":
+                llm_answer = "✅ External request completed successfully."
+            else:
+                llm_answer = f"❌ External request blocked: {fetch_decision.get('reason', 'Security policy violation')}"
+    
+    # Handle account balance/transaction requests (only if not an export/fetch)
+    elif any(keyword in user_text_lower for keyword in ["balance", "account", "transactions", "statement"]):
+        if "accounts.read" not in allowed_tools:
             raise HTTPException(
-                status_code=403, 
-                detail="HTTP fetch not allowed - missing 'http.fetch' capability"
+                status_code=403,
+                detail="Account access not permitted - missing 'accounts.read' capability"
             )
         
-        # Extract any body content for the fetch (look for patterns like "with api_key=...")
-        body_match = re.search(r'with\s+(.+)', request.user_text, re.IGNORECASE)
-        fetch_body = body_match.group(1) if body_match else ""
-        
-        # Call Gateway proxy
-        fetch_decision = await call_gateway_proxy(
-            request.agent_id, 
-            fetch_url, 
-            request.purpose,
-            fetch_body
+        # Mock account data retrieval via Gateway
+        account_fetch = await call_gateway_proxy(
+            request.agent_id,
+            "https://core-banking.internal/accounts/summary",
+            "account_inquiry",
+            ""
         )
+        
+        if account_fetch.get("status") == "ALLOW":
+            account_data = mock_account_data()
+            
+            if "transactions" in user_text_lower or "statement" in user_text_lower:
+                transactions = mock_transaction_data()
+                llm_answer = f"Here's your account summary:\n\n"
+                llm_answer += f"Account: {account_data['account_number']}\n"
+                llm_answer += f"Available Balance: {format_account_balance(account_data['available_balance'])}\n\n"
+                llm_answer += format_transaction_list(transactions)
+            else:
+                llm_answer = f"Your current account balance is {format_account_balance(account_data['available_balance'])}. "
+                llm_answer += f"Your account number ending in {account_data['account_number'][-4:]} has ${account_data['balance']:,.2f} total balance."
+        else:
+            llm_answer = "I'm unable to access your account information at this time. Please try again later."
     
-    # Always get LLM answer via Gateway
-    llm_answer = await call_gateway_llm(
-        request.agent_id,
-        request.purpose, 
-        request.user_text
-    )
+    # Handle payment requests
+    elif any(keyword in user_text_lower for keyword in ["wire", "transfer", "send money", "pay"]):
+        if "payments.create" not in allowed_tools:
+            raise HTTPException(
+                status_code=403,
+                detail="Payment creation not permitted - missing 'payments.create' capability"
+            )
+        
+        # Extract payment details
+        amount_match = re.search(r'\$([0-9,]+(?:\.[0-9]{2})?)', request.user_text)
+        payee_match = re.search(r'to\s+([A-Z][A-Z\s&\.,]+?)(?:\s|$|[^A-Za-z])', request.user_text, re.IGNORECASE)
+        
+        if amount_match and payee_match:
+            amount = float(amount_match.group(1).replace(',', ''))
+            payee_name = payee_match.group(1).strip()
+            
+            # Validate payment request
+            validation = validate_payment_request(amount, payee_name, capabilities)
+            
+            if validation["valid"]:
+                # Call Gateway to process payment
+                payment_body = {
+                    "amount": amount,
+                    "payee_id": validation["payee_info"]["id"],
+                    "payee_name": validation["payee_info"]["name"],
+                    "currency": "USD"
+                }
+                
+                payment_fetch = await call_gateway_proxy(
+                    request.agent_id,
+                    "https://payments.internal/transfers",
+                    "payment_create",
+                    json.dumps(payment_body)
+                )
+                
+                payment_result = {
+                    "amount": amount,
+                    "payee": validation["payee_info"]["name"],
+                    "status": payment_fetch.get("status", "UNKNOWN"),
+                    "gateway_response": payment_fetch
+                }
+                
+                if payment_fetch.get("status") == "ALLOW":
+                    llm_answer = f"✅ Payment of ${amount:,.2f} to {validation['payee_info']['name']} has been processed successfully. "
+                    llm_answer += f"Transaction ID: TXN_{int(time.time())}"
+                else:
+                    llm_answer = f"❌ Payment could not be processed. Reason: {payment_fetch.get('reason', 'Unknown error')}"
+            else:
+                reasons = validation["reasons"]
+                if "amount_exceeds_limit" in str(reasons):
+                    llm_answer = f"❌ Payment amount ${amount:,.2f} exceeds the chat limit of $5,000. Please use online banking for larger transfers."
+                elif "payee_not_preapproved" in reasons:
+                    llm_answer = f"❌ '{payee_name}' is not in your pre-approved payee list. Please add them through online banking first."
+                else:
+                    llm_answer = f"❌ Payment cannot be processed: {', '.join(reasons)}"
+        else:
+            llm_answer = "I need both an amount and payee name to process a payment. For example: 'Wire $500 to ACME LLC'"
+    
+    # Handle secure paylink requests
+    elif "secure pay" in user_text_lower or "payment link" in user_text_lower:
+        if "secure_paylink.create" not in allowed_tools:
+            raise HTTPException(
+                status_code=403,
+                detail="Secure paylink creation not permitted"
+            )
+        
+        amount_match = re.search(r'\$([0-9,]+(?:\.[0-9]{2})?)', request.user_text)
+        if amount_match:
+            amount = float(amount_match.group(1).replace(',', ''))
+            
+            # Call Gateway to create paylink
+            paylink_fetch = await call_gateway_proxy(
+                request.agent_id,
+                "https://payments.internal/paylinks",
+                "paylink_create",
+                json.dumps({"amount": amount, "description": "Customer payment request"})
+            )
+            
+            if paylink_fetch.get("status") == "ALLOW":
+                paylink = generate_secure_paylink(amount, "Customer payment request")
+                llm_answer = f"🔗 I've created a secure payment link for ${amount:,.2f}. "
+                llm_answer += f"Link: {paylink['url']} (expires in 1 hour)"
+            else:
+                llm_answer = "❌ Unable to create secure payment link at this time."
+        else:
+            llm_answer = "Please specify an amount for the secure payment link. For example: 'Create a secure pay link for $100'"
+    
+    # Default: Get LLM answer for general queries
+    else:
+        llm_answer = await call_gateway_llm(
+            request.agent_id,
+            request.purpose, 
+            request.user_text
+        )
     
     # Prepare response logs
     logs = {
         "processing_time_ms": round((time.time() - start_time) * 1000, 2),
         "capabilities_verified": True,
         "allowed_tools": allowed_tools,
-        "fetch_attempted": fetch_url is not None,
+        "fetch_attempted": fetch_decision is not None,
+        "payment_attempted": payment_result is not None,
+        "account_accessed": account_data is not None,
         "request_id": request.request_id
     }
     
     return AgentResponse(
         answer=llm_answer,
         fetch_decision=fetch_decision,
+        payment_result=payment_result,
+        account_data=account_data,
         logs=logs
     )
 

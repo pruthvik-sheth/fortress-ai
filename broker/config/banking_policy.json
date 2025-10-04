@@ -1,0 +1,38 @@
+{
+  "max_prompt_len": 10000,
+  "jailbreak_phrases": [
+    "ignore previous",
+    "reveal system prompt", 
+    "dump memory",
+    "bypass",
+    "jailbreak",
+    "disable safety",
+    "override instructions",
+    "system mode",
+    "admin access"
+  ],
+  "forbidden_in_chat": {
+    "pan": true,
+    "cvv": true,
+    "ssn": true
+  },
+  "safe_paths": [
+    "secure_paylink.create",
+    "payments.create", 
+    "accounts.read",
+    "transactions.read"
+  ],
+  "payment_limits": {
+    "max_amount": 5000,
+    "preapproved_only": true
+  },
+  "rbac": {
+    "DEMO-KEY": ["cust-support-bot"],
+    "BANKING-KEY": ["cust-support-bot", "payment-bot"]
+  },
+  "otp_settings": {
+    "expiry_seconds": 300,
+    "max_attempts": 3,
+    "code_length": 6
+  }
+}

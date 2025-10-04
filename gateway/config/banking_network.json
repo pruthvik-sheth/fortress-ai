@@ -1,0 +1,27 @@
+{
+  "mode": "deny_by_default",
+  "allowlist": [
+    "core-banking.internal",
+    "payments.internal", 
+    "aml.internal",
+    "kyc.internal",
+    "swift.partner.example",
+    "api.github.com"
+  ],
+  "denylist": [
+    "pastebin.com",
+    "filebin.net",
+    "ipfs.io", 
+    "transfer.sh",
+    "0bin.net",
+    "hastebin.com",
+    "tempfile.org",
+    "file.io"
+  ],
+  "email_apis": [
+    "api.sendgrid.com",
+    "api.mailgun.net", 
+    "smtp.gmail.com",
+    "outlook.office365.com"
+  ]
+}
